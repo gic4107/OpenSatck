@@ -1,0 +1,38 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          oslab-backend
+# Required-Start:    oslab-backend
+# Required-Stop:     oslab-backend
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Description:       <DESCRIPTION>
+### END INIT INFO
+
+HOME_DIR=/home/ubuntu/oslab_backend
+
+start() {
+   echo "Starting bakcend service"
+   sudo -u ubuntu -i -- bash -c "cd $HOME_DIR && forever start app.js"
+   echo "Backend service started"
+}
+
+stop() {
+   echo "Stoping backend service"
+   sudo -u ubuntu -i -- bash -c "cd $HOME_DIR && forever stop app.js"
+   echo "Backend service stopped"
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  retart)
+    stop
+    start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restar}"
+esac

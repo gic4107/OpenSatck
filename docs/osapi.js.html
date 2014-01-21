@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: osapi.js</title>
+    
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+    
+    <h1 class="page-title">Source: osapi.js</h1>
+    
+    
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source"><code>/**
+ * @module lib/osapi
+ */
+
+var http = require('http');
+var url = require('url');
+
+
+function typeOf(value) {
+    var s = typeof value;
+    if (s === 'object') {
+        if (value) {
+            if (Object.prototype.toString.call(value) == '[object Array]') {
+                s = 'array';
+            }
+        } else {
+            s = 'null';
+        }
+    }
+    return s;
+}
+function isStr(it){
+	return typeOf(it) === "string"; //NOTE: maybe need to include String as well
+}
+function isObj(it){
+	return typeOf(it) === "object";
+}
+
+function request(options, cb){
+	var mUrl = url.parse(options.url || ""),
+		mOptions = {
+			method: options.method || "GET",
+			hostname: mUrl.hostname || options.hostname || "localhost",
+			port: mUrl.port || options.port || 80,
+			path: mUrl.path || options.path || "/",
+			headers: options.headers || {},
+		},
+		reqData = (isObj(options.data) ? JSON.stringify(options.data) : (isStr(options.data) ? options.data : null)),
+		resStr = "";
+	
+	var req = http.request(mOptions, function(res){
+		res.setEncoding('utf8');
+		res.on('data', function(chunk){
+			resStr += chunk;
+		});
+		res.on('end', function(){
+			var resData = null;
+			try{
+				resData = JSON.parse(resStr);
+			} catch(e){
+				resData = null;
+			}
+			
+			if(res.statusCode >= 200 &amp;&amp; res.statusCode &lt; 300){
+				console.log("Received response from " + options.url + " ["+ res.statusCode +"]");
+				cb(null, resData || true);
+			}
+			else{
+				console.log("ERROR: Failed to receive response from " + options.url + " ["+ res.statusCode +"]");
+				if(resData){
+					if(resData.error &amp;&amp; resData.error.message) console.log("ERROR MSG: " + resData.error.message);
+					else console.log("ERROR JSON: " + resStr);
+				}
+				cb(true);
+			}
+		});
+	});
+
+	if(reqData) req.end(reqData, 'utf8');
+	else req.end();
+}
+
+/**
+ * API callback function
+ * @callback apiCallback
+ * @param {String}	err					error string if error happened, null otherwise
+ * @param {(Object|Object[])}	result	result object if no error happened, undefined otherwise (see each specific API function for details)
+ */
+
+var clients = {};
+
+/**
+ * OSApi client class
+ * @constructor
+ * @alias module:lib/osapi
+ * 
+ * @param {(Object|String)} config			client configuration options OR a name of the previously configured client
+ * @param {Object} config.name				name this client
+ * @param {String} config.keystoneUrl		base URL of Identity (Keystone) API
+ * @param {String} config.novaUrl			base URL of Compute (Nova) API, (including tennant ID at the end)
+ */
+var OSApi = function(config){
+	if (!(this instanceof OSApi)){
+        return new OSApi();
+	}
+
+	var cli = null;
+	if(isStr(config) &amp;&amp; (cli = clients[config])){
+		return cli;
+	}
+	if(!isObj(config)){
+		throw "First argument to the OSApi function should be Object or String";
+	}
+
+	this.config = {
+		name: config.name || null,
+		keystoneUrl : config.keystoneUrl || 'http://192.168.1.151:5000/v2.0',
+		novaUrl : config.novaUrl || 'http://192.168.1.151:8774/v2/4c6e2414f8064608b41309662a9e904d'
+	};
+	if(isStr(config.name)) clients[config.name] = this;
+ 
+	this.token = null;
+	this.instances = null;
+	this.images = null;
+	this.flavor = null;
+
+};
+
+
+/**
+ * Acquire a token using user's info for authentication of further API calls.
+ * This should be called before any other method, otherwise all other API calls will fail.
+ * @param {Object} userInfo					user info object
+ * @param {String} userInfo.tenantName		name of the tenant (project)
+ * @param {String} userInfo.username		username
+ * @param {String} userInfo.password		password
+ * @param  {apiCallback} cb					callback function, access info object on success 
+ *                              			(@see {@link http://api.openstack.org/api-ref-identity.html#identity|POST v2.0/tokens Identity API (responseJSON.access)})
+ */
+OSApi.prototype.acquireToken = function(userInfo, cb){
+	var self = this;
+	var options = {
+		method: 'POST',
+		url: this.config.keystoneUrl + '/tokens',
+		headers: {
+			'Content-Type': 'application/json'
+		},
+		data: {
+			auth: {
+				tenantName: userInfo.tenantName,
+				passwordCredentials: {
+					username: userInfo.username,
+					password: userInfo.password
+				}
+			}
+		}
+	};
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to acquire a token");
+		self.token = data.access.token.id;
+		
+		var expireTime = (new Date(data.access.token.expires)).getTime() - (new Date()).getTime();
+		setTimeout(function(){
+			console.log("Token is expired. Please reacquire a new one.");
+			self.token = null;
+		}, expireTime);
+		cb(null, self.token);
+	});
+};
+
+/**
+ * Get list of instances in the project
+ * @param  {apiCallback}	cb		callback function, returns list of instances (array of objects) on success
+ *                             		(@see {@link http://api.openstack.org/api-ref-compute.html#compute|GET v2/​{tenant_id}​/servers Compute API (responseJSON.servers)})
+ */
+OSApi.prototype.getInstances = function(cb){
+	if(!this.token) return cb("Token hasn't been acquired yet or it has expired", true);
+
+	var self = this;
+	var options = {
+		url: this.config.novaUrl + '/servers',
+		headers: {
+			'X-Auth-Token' : this.token
+		}
+	};
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to get list of instances");
+		self.instances = data.servers;
+		cb(null, self.instances);
+	});
+};
+
+/**
+ * Get list of images available for the project
+ * @param  {apiCallback}	cb		callback function, returns list of available images (array of objects) on success
+ *                           		(@see {@link http://api.openstack.org/api-ref-compute.html#compute|GET v2/​images Compute API (responseJSON.images)})
+ */
+OSApi.prototype.getImages = function(cb){
+	if(!this.token) return cb("Token hasn't been acquired yet or it has expired", true);
+
+	var self = this;
+	var options = {
+		url: this.config.novaUrl + '/images',
+		headers: {
+			'X-Auth-Token' : this.token
+		}
+	};
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to get list of images");
+		self.images = data.images;
+		cb(null, self.images);
+	});
+};
+
+/**
+ * Gets the list of floating IPs allocated for the project
+ * @param  {apiCallback}	cb		callback function, returns list of allocated floating IPs (array of objects) on success
+ *                           		(@see {@link http://api.openstack.org/api-ref-compute.html#compute|GET v2/​{tenant_id}​/os-floating-ips Compute API (responseJSON.floating_ips)})
+ */
+OSApi.prototype.getFloatingIps = function(cb){
+	if(!this.token) return cb("Token hasn't been acquired yet or it has expired", true);
+
+	var self = this;
+	var options = {
+		url: this.config.novaUrl + '/os-floating-ips',
+		headers: {
+			'X-Auth-Token' : this.token
+		}
+	};
+
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to get the list of floating IPs");
+		self.floating_ips = data.floating_ips;
+		cb(null, self.floating_ips);
+	});
+};
+
+/**
+ * Launches a new instance
+ * @param  {Object}			params						API parameters:
+ * @param  {String}			params.instanceName			name to assign to a new instance
+ * @param  {String}			params.imageId				ID of the image to use for this instance
+ * @param  {String}			params.keypairName			name of keypair to use for this instance
+ * @param  {apiCallback}	cb							callback function, returns newly launched instance info object on success
+ *                                						(@see {@link http://api.openstack.org/api-ref-compute.html#compute|POST v2/​{tenant_id}​/servers Compute API (responseJSON.server)})
+ */
+OSApi.prototype.launchInstance = function(params, cb){
+	if(!this.token) return cb("Token hasn't been acquired yet or it has expired", true);
+
+	var options = {
+		method: 'POST',
+		url: this.config.novaUrl + '/servers',
+		headers: {
+			'Content-Type': 'application/json',
+			'X-Auth-Token' : this.token
+		},
+		data: {
+			server : {
+				name: params.instanceName,
+				imageRef: params.imageId,
+				key_name: params.keypairName,
+				flavorRef: "1",
+				max_count: 1,
+				min_count: 1
+			}
+		}
+	};
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to launch new instance");
+		cb(null, data.server);
+	});
+};
+
+/**
+ * Associates floating IP with an instance
+ * @param  {Object}			params						API parameters:
+ * @param  {String}			params.instanceId			ID of the instance
+ * @param  {String}			params.floatingIpAddress	IP address to associate with an instance
+ * @param  {apiCallback}	cb							callback function, returns true on success
+ *                                						(@see {@link http://api.openstack.org/api-ref-compute.html#compute|POST v2/​{tenant_id}​/servers/​{server_id}​/action Compute API})
+ */
+OSApi.prototype.associateFloatingIp = function(params, cb){
+	if(!this.token) return cb("Token hasn't been acquired yet or it has expired", true);
+
+	var options = {
+		method: 'POST',
+		url: this.config.novaUrl + '/servers/' + params.instanceId + '/action',
+		headers: {
+			'Content-Type': 'application/json',
+			'X-Auth-Token' : this.token
+		},
+		data: {
+			addFloatingIp: {
+				address: params.floatingIpAddress
+			}
+		}
+	};
+	request(options, function(err, data){
+		if(err || data === null) return cb("Failed to associate floating IP");
+		cb(null, data);
+	});
+};
+
+
+module.exports = OSApi;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Index</a></h2><h3>Modules</h3><ul><li><a href="osapi.html">lib/osapi</a></li></ul><h3><a href="global.html">Global</a></h3>
+</nav>
+
+<br clear="both">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 3.3.0-alpha2</a> on Tue Dec 31 2013 17:07:59 GMT+0800 (CST)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
